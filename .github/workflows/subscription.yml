@@ -1,0 +1,93 @@
+name: Update Base64 subscription
+
+on:
+  schedule:
+    - cron: '7,37 * * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: subscription-pages
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    environment:
+      name: github-pages
+      url: ${{ steps.deploy.outputs.page_url }}
+    steps:
+      - name: Fetch and validate subscription
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          import base64
+          import html
+          import re
+          import time
+          from pathlib import Path
+          from urllib.parse import unquote, urlsplit
+          from urllib.request import Request, urlopen
+
+          source = 'https://tgproxy.pink/zh/keys/'
+          schemes = {'vless', 'trojan', 'hysteria2', 'hy2'}
+          pattern = re.compile(r'''(?:vless|trojan|hysteria2|hy2)://[^\s<>"'\x60]+''', re.I)
+          encoded = re.compile(r'''(?:vless|trojan|hysteria2|hy2)%3A%2F%2F[^\s<>"'\x60]+''', re.I)
+          limit = 8 * 1024 * 1024
+
+          def fetch_nodes():
+              request = Request(source, headers={'User-Agent': 'Mozilla/5.0', 'Accept': 'text/html'})
+              with urlopen(request, timeout=30) as response:
+                  if urlsplit(response.geturl()).hostname != 'tgproxy.pink':
+                      raise ValueError('Unexpected redirect')
+                  data = response.read(limit + 1)
+                  if len(data) > limit:
+                      raise ValueError('Source page exceeded size limit')
+                  page = html.unescape(data.decode('utf-8-sig'))
+
+              nodes = {}
+              candidates = pattern.findall(page) + [unquote(value) for value in encoded.findall(page)]
+              for node in candidates:
+                  try:
+                      parsed = urlsplit(node)
+                      if parsed.scheme not in schemes or not parsed.hostname or not parsed.username:
+                          continue
+                      parsed.port
+                  except ValueError:
+                      continue
+                  scheme = 'hysteria2' if parsed.scheme == 'hy2' else parsed.scheme
+                  node = scheme + node[node.index(':'):]
+                  nodes.setdefault(node.partition('#')[0], node)
+              if not nodes:
+                  raise ValueError('No valid node links found')
+              return list(nodes.values())
+
+          for attempt in range(3):
+              try:
+                  nodes = fetch_nodes()
+                  break
+              except (OSError, ValueError) as error:
+                  print(f'Source fetch failed on attempt {attempt + 1}: {type(error).__name__}', flush=True)
+                  if attempt == 2:
+                      raise SystemExit('Keeping the previous GitHub Pages deployment.') from None
+                  time.sleep(5 * (attempt + 1))
+
+          output = Path('public')
+          output.mkdir()
+          payload = ('\n'.join(nodes) + '\n').encode('utf-8')
+          (output / 'sub.txt').write_bytes(base64.b64encode(payload) + b'\n')
+          (output / '.nojekyll').touch()
+          print(f'Prepared {len(nodes)} unique nodes.')
+          PY
+      - name: Upload Pages artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: public
+      - name: Deploy to GitHub Pages
+        id: deploy
+        uses: actions/deploy-pages@v4
