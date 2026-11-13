@@ -35,8 +35,8 @@ jobs:
 
           source = 'https://freevpnkeys.com/sub/happ'
           allowed_host = 'freevpnkeys.com'
-          pattern = re.compile(r'''(?:hysteria2|hy2)://[^\\s<>"'\\x60]+''', re.I)
-          encoded = re.compile(r'''(?:hysteria2|hy2)%3A%2F%2F[^\\s<>"'\\x60]+''', re.I)
+          pattern = re.compile(r'''(?:hysteria2|hy2)://[^\s<>"'\x60]+''', re.I)
+          encoded = re.compile(r'''(?:hysteria2|hy2)%3A%2F%2F[^\s<>"'\x60]+''', re.I)
           limit = 8 * 1024 * 1024
 
           def fetch_nodes():
@@ -52,7 +52,7 @@ jobs:
                       raise ValueError('Subscription exceeded size limit')
 
               text = data.decode('utf-8-sig', errors='replace').strip()
-              compact = re.sub(r'\\s+', '', text)
+              compact = re.sub(r'\s+', '', text)
               if compact and re.fullmatch(r'[A-Za-z0-9+/=_-]+', compact):
                   try:
                       padded = compact.replace('-', '+').replace('_', '/')
@@ -94,8 +94,8 @@ jobs:
                       raise SystemExit('No update published; previous subscription remains unchanged.') from None
                   time.sleep(5 * (attempt + 1))
 
-          payload = ('\\n'.join(nodes) + '\\n').encode('utf-8')
-          Path('freevpnkeys.txt').write_bytes(base64.b64encode(payload) + b'\\n')
+          payload = ('\n'.join(nodes) + '\n').encode('utf-8')
+          Path('freevpnkeys.txt').write_bytes(base64.b64encode(payload) + b'\n')
           print(f'Prepared {len(nodes)} unique Hysteria2 nodes.')
           PY
 
