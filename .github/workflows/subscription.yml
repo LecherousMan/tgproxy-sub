@@ -42,7 +42,7 @@ jobs:
                   'schemes': {'vless', 'trojan', 'hysteria2', 'hy2'},
               },
               {
-                  'url': 'https://freevpnkeys.com/sub/protocol/hysteria2',
+                  'url': 'https://freevpnkeys.com/sub/happ',
                   'host': 'freevpnkeys.com',
                   'schemes': {'hysteria2', 'hy2'},
               },
