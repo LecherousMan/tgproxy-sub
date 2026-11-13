@@ -1,0 +1,113 @@
+name: Update FreeVPNKeys Hysteria2 subscription
+
+on:
+  schedule:
+    - cron: '17,47 * * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: freevpnkeys-subscription
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Fetch and validate FreeVPNKeys Hysteria2 nodes
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          import base64
+          import binascii
+          import html
+          import re
+          import time
+          from pathlib import Path
+          from urllib.parse import unquote, urlsplit
+          from urllib.request import Request, urlopen
+
+          source = 'https://freevpnkeys.com/sub/happ'
+          allowed_host = 'freevpnkeys.com'
+          pattern = re.compile(r'''(?:hysteria2|hy2)://[^\\s<>"'\\x60]+''', re.I)
+          encoded = re.compile(r'''(?:hysteria2|hy2)%3A%2F%2F[^\\s<>"'\\x60]+''', re.I)
+          limit = 8 * 1024 * 1024
+
+          def fetch_nodes():
+              request = Request(source, headers={
+                  'User-Agent': 'Mozilla/5.0 (compatible; tgproxy-sub/1.0)',
+                  'Accept': 'text/plain,text/html,application/octet-stream,*/*',
+              })
+              with urlopen(request, timeout=30) as response:
+                  if (urlsplit(response.geturl()).hostname or '').lower() != allowed_host:
+                      raise ValueError('Unexpected redirect host')
+                  data = response.read(limit + 1)
+                  if len(data) > limit:
+                      raise ValueError('Subscription exceeded size limit')
+
+              text = data.decode('utf-8-sig', errors='replace').strip()
+              compact = re.sub(r'\\s+', '', text)
+              if compact and re.fullmatch(r'[A-Za-z0-9+/=_-]+', compact):
+                  try:
+                      padded = compact.replace('-', '+').replace('_', '/')
+                      padded += '=' * (-len(padded) % 4)
+                      decoded = base64.b64decode(padded, validate=True).decode('utf-8', errors='ignore')
+                      if '://' in decoded:
+                          text = decoded
+                  except (binascii.Error, ValueError):
+                      pass
+
+              text = html.unescape(text)
+              candidates = pattern.findall(text)
+              candidates += [unquote(value) for value in encoded.findall(text)]
+              nodes = {}
+              for node in candidates:
+                  try:
+                      parsed = urlsplit(node)
+                      if parsed.scheme.lower() not in {'hysteria2', 'hy2'}:
+                          continue
+                      if not parsed.hostname or not parsed.username:
+                          continue
+                      parsed.port
+                  except ValueError:
+                      continue
+                  if parsed.scheme.lower() == 'hy2':
+                      node = 'hysteria2' + node[node.index(':'):]
+                  nodes.setdefault(node.partition('#')[0], node)
+              if not nodes:
+                  raise ValueError('No valid Hysteria2 URI found in source response')
+              return list(nodes.values())
+
+          for attempt in range(3):
+              try:
+                  nodes = fetch_nodes()
+                  break
+              except (OSError, ValueError) as error:
+                  print(f'Fetch failed on attempt {attempt + 1}: {type(error).__name__}', flush=True)
+                  if attempt == 2:
+                      raise SystemExit('No update published; previous subscription remains unchanged.') from None
+                  time.sleep(5 * (attempt + 1))
+
+          payload = ('\\n'.join(nodes) + '\\n').encode('utf-8')
+          Path('freevpnkeys.txt').write_bytes(base64.b64encode(payload) + b'\\n')
+          print(f'Prepared {len(nodes)} unique Hysteria2 nodes.')
+          PY
+
+      - name: Commit standalone subscription
+        shell: bash
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add freevpnkeys.txt
+          if git diff --cached --quiet; then
+            echo "Subscription unchanged; no commit needed."
+          else
+            git commit -m "Update FreeVPNKeys Hysteria2 subscription"
+            git push
+          fi
