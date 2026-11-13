@@ -22,11 +22,12 @@ jobs:
       name: github-pages
       url: ${{ steps.deploy.outputs.page_url }}
     steps:
-      - name: Fetch and validate subscription
+      - name: Fetch, merge and validate subscriptions
         shell: bash
         run: |
           python3 - <<'PY'
           import base64
+          import binascii
           import html
           import re
           import time
@@ -34,55 +35,99 @@ jobs:
           from urllib.parse import unquote, urlsplit
           from urllib.request import Request, urlopen
 
-          source = 'https://tgproxy.pink/zh/keys/'
-          schemes = {'vless', 'trojan', 'hysteria2', 'hy2'}
+          sources = [
+              {
+                  'url': 'https://tgproxy.pink/zh/keys/',
+                  'host': 'tgproxy.pink',
+                  'schemes': {'vless', 'trojan', 'hysteria2', 'hy2'},
+              },
+              {
+                  'url': 'https://freevpnkeys.com/sub/protocol/hysteria2',
+                  'host': 'freevpnkeys.com',
+                  'schemes': {'hysteria2', 'hy2'},
+              },
+          ]
           pattern = re.compile(r'''(?:vless|trojan|hysteria2|hy2)://[^\s<>"'\x60]+''', re.I)
           encoded = re.compile(r'''(?:vless|trojan|hysteria2|hy2)%3A%2F%2F[^\s<>"'\x60]+''', re.I)
           limit = 8 * 1024 * 1024
 
-          def fetch_nodes():
-              request = Request(source, headers={'User-Agent': 'Mozilla/5.0', 'Accept': 'text/html'})
+          def fetch_source(source):
+              request = Request(
+                  source['url'],
+                  headers={
+                      'User-Agent': 'Mozilla/5.0 (compatible; tgproxy-sub/1.0)',
+                      'Accept': 'text/plain,text/html,application/octet-stream,*/*',
+                  },
+              )
               with urlopen(request, timeout=30) as response:
-                  if urlsplit(response.geturl()).hostname != 'tgproxy.pink':
-                      raise ValueError('Unexpected redirect')
+                  final_host = (urlsplit(response.geturl()).hostname or '').lower()
+                  if final_host != source['host']:
+                      raise ValueError('Unexpected redirect host')
                   data = response.read(limit + 1)
                   if len(data) > limit:
-                      raise ValueError('Source page exceeded size limit')
-                  page = html.unescape(data.decode('utf-8-sig'))
+                      raise ValueError('Source exceeded size limit')
 
+              text = data.decode('utf-8-sig', errors='replace').strip()
+              # Some subscription endpoints return Base64 while others return URI text.
+              compact = re.sub(r'\s+', '', text)
+              if compact and re.fullmatch(r'[A-Za-z0-9+/=_-]+', compact):
+                  try:
+                      padded = compact.replace('-', '+').replace('_', '/')
+                      padded += '=' * (-len(padded) % 4)
+                      decoded = base64.b64decode(padded, validate=True).decode('utf-8', errors='ignore')
+                      if '://' in decoded:
+                          text = decoded
+                  except (binascii.Error, ValueError):
+                      pass
+
+              text = html.unescape(text)
+              candidates = pattern.findall(text)
+              candidates += [unquote(value) for value in encoded.findall(text)]
               nodes = {}
-              candidates = pattern.findall(page) + [unquote(value) for value in encoded.findall(page)]
               for node in candidates:
                   try:
                       parsed = urlsplit(node)
-                      if parsed.scheme not in schemes or not parsed.hostname or not parsed.username:
+                      scheme = parsed.scheme.lower()
+                      if scheme not in source['schemes'] or not parsed.hostname or not parsed.username:
                           continue
                       parsed.port
                   except ValueError:
                       continue
-                  scheme = 'hysteria2' if parsed.scheme == 'hy2' else parsed.scheme
-                  node = scheme + node[node.index(':'):]
+                  normalized_scheme = 'hysteria2' if scheme == 'hy2' else scheme
+                  node = normalized_scheme + node[node.index(':'):]
                   nodes.setdefault(node.partition('#')[0], node)
               if not nodes:
-                  raise ValueError('No valid node links found')
+                  raise ValueError('No valid supported node links found')
               return list(nodes.values())
 
-          for attempt in range(3):
-              try:
-                  nodes = fetch_nodes()
-                  break
-              except (OSError, ValueError) as error:
-                  print(f'Source fetch failed on attempt {attempt + 1}: {type(error).__name__}', flush=True)
-                  if attempt == 2:
-                      raise SystemExit('Keeping the previous GitHub Pages deployment.') from None
-                  time.sleep(5 * (attempt + 1))
+          merged = {}
+          failures = []
+          for source in sources:
+              for attempt in range(3):
+                  try:
+                      found = fetch_source(source)
+                      for node in found:
+                          merged.setdefault(node.partition('#')[0], node)
+                      print(f"Fetched {len(found)} nodes from {source['host']}.", flush=True)
+                      break
+                  except (OSError, ValueError) as error:
+                      print(f"Fetch failed for {source['host']} on attempt {attempt + 1}: {type(error).__name__}", flush=True)
+                      if attempt == 2:
+                          failures.append(source['host'])
+                      else:
+                          time.sleep(5 * (attempt + 1))
+
+          if not merged:
+              raise SystemExit('No valid nodes fetched; keeping the previous GitHub Pages deployment.')
+          if failures:
+              print('Warning: source unavailable: ' + ', '.join(failures), flush=True)
 
           output = Path('public')
           output.mkdir()
-          payload = ('\n'.join(nodes) + '\n').encode('utf-8')
+          payload = ('\n'.join(merged.values()) + '\n').encode('utf-8')
           (output / 'sub.txt').write_bytes(base64.b64encode(payload) + b'\n')
           (output / '.nojekyll').touch()
-          print(f'Prepared {len(nodes)} unique nodes.')
+          print(f'Prepared {len(merged)} unique nodes total.')
           PY
       - name: Upload Pages artifact
         uses: actions/upload-pages-artifact@v3
